@@ -639,6 +639,6 @@ class WebReader:
                 clean_url = content['url'].split('#')[0].split('?')[0]
                 key = get_url_key(clean_url)
                 filename = token_map.get(key, "unknown.md")
-                f.write(f"{i}. [{content['title']}](./{filename})\n")
+                f.write(f"{i}. [{content['title']}](./{filename})\n   > Origin: {clean_url}\n\n")
         
         print(f"[SUCCESS] 保存完成! 共 {len(ordered_results)} 个文件")

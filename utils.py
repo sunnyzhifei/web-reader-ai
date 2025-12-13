@@ -135,9 +135,6 @@ def save_content(content: dict, filepath: str, format: str = 'markdown'):
     if format == 'markdown':
         ext = '.md'
         text = f"# {content.get('title', 'Untitled')}\n\n"
-        text += f"> **URL:** {content.get('url', '')}\n"
-        text += f"> **抓取时间:** {content.get('crawl_time', '')}\n\n"
-        text += "---\n\n"
         text += content.get('text', '')
     elif format == 'json':
         ext = '.json'
