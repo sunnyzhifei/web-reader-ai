@@ -12,7 +12,7 @@ DEFAULT_CONFIG = {
     "max_pages": 50,
     
     # 请求超时时间 (秒)
-    "timeout": 30,
+    "timeout": 60,
     
     # 请求间隔时间 (秒) - 避免过于频繁的请求
     "delay": 1.0,
@@ -21,9 +21,9 @@ DEFAULT_CONFIG = {
     "same_domain_only": True,
 
     # Playwright 配置
-    "headless": False,       # 方便调试：默认显示浏览器
+    "headless": True,       # 无头模式
     "concurrency": 2,        # 降低并发，模拟人类行为
-    "wait_until": "domcontentloaded", # 降低标准，防止网络空闲检测超时
+    "wait_until": "networkidle", # 使用 networkidle 确保 SPA 完全加载
     "js_render_wait": 5.0,   # 增加等待时间，确保飞书完全渲染
     
     # ISO-8601 要排除的URL模式 (正则表达式)
