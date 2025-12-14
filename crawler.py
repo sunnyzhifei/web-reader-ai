@@ -3,6 +3,16 @@
 网页内容递归阅读器 - 核心爬虫模块 (Playwright 版)
 """
 
+import sys
+import io
+
+# 强制设置标准输出为 UTF-8，解决 Windows 控制台无法输出 emoji 的问题
+if sys.stdout and hasattr(sys.stdout, 'buffer'):
+    try:
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+    except Exception:
+        pass  # 如果失败则忽略，不影响主流程
+
 import asyncio
 import re
 import os
@@ -62,8 +72,14 @@ class WebReader:
         # 因为它在处理 HTML 结构和去噪方面非常方便。
         soup = BeautifulSoup(html, 'lxml')
         # DEBUG: Save the raw HTML to inspect why links are missing
-        # with open('debug_page.html', 'w', encoding='utf-8') as f:
-        #    f.write(soup.prettify())
+        debug_path = os.path.join(self.config['output_dir'], 'debug_page.html')
+        # 确保目录存在
+        os.makedirs(os.path.dirname(debug_path), exist_ok=True)
+        try:
+            with open(debug_path, 'w', encoding='utf-8') as f:
+               f.write(soup.prettify())
+        except Exception as e:
+            print(f"  [WARN] 无法保存调试HTML: {e}")
         settings = self.config['extract_settings']
 
         # --- 核心修复: 提前提取链接 ---
@@ -153,39 +169,284 @@ class WebReader:
             
             return content
 
-        # 1. 表格处理 (富文本优化版)
-        for table in main_content.find_all('table'):
-            rows = []
-            # 获取所有行
-            trs = table.find_all('tr')
-            if not trs: continue
+        # 1. 表格处理 (增强版：支持标准 Table 和 ARIA Grid/Table)
+        
+        # --- 飞书列表视图探测 (临时调试) ---
+        owner_span = main_content.find(string=re.compile("所有者"))
+        if owner_span:
+            print(f"  [DEBUG] 找到 '所有者' 文本节点")
+            parent = owner_span.parent
+            for i in range(5):
+                if parent:
+                    print(f"    Parent-{i}: {parent.name} class={parent.get('class')} role={parent.get('role')}")
+                    parent = parent.parent
+        # --------------------------------
+        
+        # 预先提取所有表格，用占位符替换
+        table_markdown_map = {}  # 占位符 ID -> Markdown 表格内容
+        table_index = 0
+        
+        # 查找所有可能的表格容器
+        # 1. 标准 table 标签
+        # 2. ARIA 表格 (div role="table" / "grid" / "treegrid")
+        potential_tables = []
+        potential_tables.extend(main_content.find_all('table'))
+        potential_tables.extend(main_content.select('[role="table"], [role="grid"], [role="treegrid"]'))
+        
+        # 去重 (防止 table 标签同时有 role 属性被添加两次)
+        unique_tables = []
+        seen_tables = set()
+        for t in potential_tables:
+            if t in seen_tables: continue
+            seen_tables.add(t)
+            unique_tables.append(t)
+
+        for table in unique_tables:
+            rows_data = []
             
-            for tr in trs:
-                cells = []
-                for td in tr.find_all(['td', 'th']):
-                    # 使用 process_node 获取富文本，而不是 get_text
-                    cell_content = process_node(td).strip()
-                    # Markdown 表格不支持换行符，必须用 <br> 替代
-                    cell_content = cell_content.replace('\n', '<br>')
-                    # 移除管道符，防止破坏表格结构
-                    cell_content = cell_content.replace('|', '&#124;')
-                    cells.append(cell_content)
-                rows.append('| ' + ' | '.join(cells) + ' |')
+            # --- 策略 A: 标准 HTML 表格 ---
+            if table.name == 'table':
+                for tr in table.find_all('tr'):
+                    cells = []
+                    for td in tr.find_all(['td', 'th']):
+                        cell_content = process_node(td).strip()
+                        cell_content = re.sub(r'\s+', ' ', cell_content).replace('\n', ' ').replace('|', '\\|')
+                        cells.append(cell_content)
+                    if cells:
+                        rows_data.append(cells)
             
-            if rows:
-                if len(rows) > 1:
-                    # 插入分隔行
-                    cols_count = len(rows[0].split('|')) - 2
-                    rows.insert(1, '| ' + ' | '.join(['---'] * cols_count) + ' |')
+            # --- 策略 B: ARIA 伪表格 (div 结构) ---
+            else:
+                # 查找行 (role="row")
+                raw_rows = table.select('[role="row"]')
                 
-                table_md = '\n'.join(rows) + '\n'
-                table.replace_with(f"\n{table_md}\n")
+                # 飞书/通用 Grid 适配：如果找不到 role="row"，尝试 class 匹配
+                if not raw_rows:
+                    # 尝试查找包含 row 关键字的 div
+                    # 针对飞书: table-view-header-row, table-view-row
+                    raw_rows = table.select('div[class*="table-view-header-row"], div[class*="table-view-row"]')
+                
+                for row in raw_rows:
+                    cells = []
+                    # 查找单元格
+                    # 1. 标准 ARIA role
+                    raw_cells = row.select('[role="cell"], [role="gridcell"], [role="columnheader"], [role="rowheader"]')
+                    
+                    # 2. 飞书适配: table-view-cell, table-view-header-cell
+                    if not raw_cells:
+                        raw_cells = row.select('div[class*="table-view-cell"], div[class*="table-view-header-cell"]')
+                        
+                    for cell in raw_cells:
+                        cell_content = process_node(cell).strip()
+                        cell_content = re.sub(r'\s+', ' ', cell_content).replace('\n', ' ').replace('|', '\\|')
+                        cells.append(cell_content)
+                    
+                    if cells:
+                        rows_data.append(cells)
+        # --- 补充策略：精确匹配飞书/Notion等基于div的表格 ---
+        # 逻辑：找到 Header -> 查找紧邻的 Body/Rows -> 独立处理每个表格
+        
+        # 查找所有表头容器
+        # 针对飞书: class="table-view-header" (容器) 或 class="table-view-header-row" (行)
+        headers = list(main_content.select('div[class*="table-view-header-row"]'))
+        
+        # 为了防止父子包含关系（如果 table-view-header 包含 row），我们先去重
+        # 但飞书通常是平级的。
+        
+        for header_row in headers:
+            # 检查这个 header 是否已经被处理过 (作为某个 table 的一部分被替换了)
+            if header_row.parent and header_row.parent.get('data-table-processed'):
+                continue
+                
+            # 找到包含这个 header row 的最小容器（通常是 table-view-header）
+            header_container = header_row.parent
+            while header_container and 'table-view-header' not in str(header_container.get('class', [])):
+                if header_container.name == 'body': break
+                header_container = header_container.parent
+            
+            if not header_container: 
+                header_container = header_row.parent # fallback
+            
+            # 1. 提取表头数据
+            header_cells = []
+            # 仅查找直接子元素作为 Cell，防止递归匹配导致内容重复 (列重复/数据堆叠)
+            for child in header_row.find_all(recursive=False):
+                # 检查是否为 Cell 样式的 div
+                classes = str(child.get('class', []))
+                if 'table-view-header-cell' in classes or \
+                   'table-view-cell' in classes or \
+                   child.get('role') in ['columnheader', 'cell', 'gridcell']:
+                    
+                    header_cells.append(process_node(child).strip().replace('\n', ' ').replace('|', '\\|'))
+            
+            # 如果没有找到直接子元素 Cell，可能这就不是一个 Row，或者结构非常特殊
+            # 这种情况下尝试查找第一层级的 Cell (深度为1)
+            if not header_cells:
+                 for cell in header_row.select('div[class*="table-view-header-cell"], div[class*="table-view-cell"]'):
+                     # 防止无限递归，只取第一层匹配
+                     if 'table-view-cell' in str(cell.parent.get('class', [])): continue 
+                     header_cells.append(process_node(cell).strip().replace('\n', ' ').replace('|', '\\|'))
+
+            if not header_cells: continue
+            
+            # 2. 查找对应的数据行
+            # 策略：查找 header_container 的下一个兄弟，看是否是 body 或者包含 rows
+            data_rows = []
+            
+            # 尝试一：header_container 的下一个兄弟是 Body
+            next_sibling = header_container.find_next_sibling()
+            rows_container = None
+            
+            if next_sibling:
+                # 可能是 Body 容器
+                if 'table-view-body' in str(next_sibling.get('class', [])) or \
+                   'table-body' in str(next_sibling.get('class', [])):
+                    rows_container = next_sibling
+                # 或者直接就是 Row (如果是一个扁平列表)
+                elif 'table-view-row' in str(next_sibling.get('class', [])):
+                    # 如果直接是 row，我们需要收集所有连续的 row
+                    # 这比较复杂，暂且假设有一个容器
+                    rows_container = next_sibling.parent 
+            
+            # 如果没找到明确的 Body，尝试在 header_container 的父级中查找所有 rows
+            # 并且通过位置判断（必须在 header 之后）
+            if not rows_container:
+                rows_container = header_container.parent
+                
+            if rows_container:
+                # 在容器中查找所有 row
+                raw_rows_selection = rows_container.select('div[class*="table-view-row"]')
+                
+                # 去重：过滤掉嵌套的 row (只保留最顶层的 row)
+                all_possible_rows = []
+                for row in raw_rows_selection:
+                    # 检查父级链中是否有其他 row
+                    is_nested = False
+                    parent = row.parent
+                    while parent and parent != rows_container:
+                        if 'table-view-row' in str(parent.get('class', [])):
+                            is_nested = True
+                            break
+                        parent = parent.parent
+                    
+                    if not is_nested:
+                        all_possible_rows.append(row)
+                
+                # 找到下一个表头的位置 (用于截断)
+                current_header_idx = headers.index(header_row)
+                next_header_row = headers[current_header_idx + 1] if current_header_idx + 1 < len(headers) else None
+                
+                # 过滤：只保留在 header_row *之后* 的 row
+                # 并且不能属于下一个 header (防止把下一个表格的行也抓进来)
+                for row in all_possible_rows:
+                    # 必须在 header 后面
+                    if row.sourceline and header_row.sourceline and row.sourceline <= header_row.sourceline:
+                        continue
+                    
+                    # 关键修复：如果行在下一个表头之后，说明属于下一个表格，停止收集
+                    if next_header_row and row.sourceline and next_header_row.sourceline and row.sourceline >= next_header_row.sourceline:
+                        break
+                    
+                    # 提取单元格 (同样应用非递归策略)
+                    row_cells = []
+                    for child in row.find_all(recursive=False):
+                        classes = str(child.get('class', []))
+                        if 'table-view-cell' in classes or \
+                           child.get('role') in ['cell', 'gridcell']:
+                            row_cells.append(process_node(child).strip().replace('\n', ' ').replace('|', '\\|'))
+                    
+                    # Fallback (同 Header)
+                    if not row_cells:
+                        for cell in row.select('div[class*="table-view-cell"]'):
+                            if 'table-view-cell' in str(cell.parent.get('class', [])): continue 
+                            row_cells.append(process_node(cell).strip().replace('\n', ' ').replace('|', '\\|'))
+                    
+                    if row_cells:
+                        data_rows.append(row_cells)
+
+            # --- 优化：多表格切分 ---
+            # 如果 rows_container 包含多个 header，我们需要截断
+            # 简单做法：如果 data_rows 里混进了下一个表格的 row，通常很难区分，
+            # 除非我们按 DOM 树遍历。
+            # 这里做一个简单假设：每个表格都有独立的 header container 结构。
+            
+            # --- 优化：对齐表头和内容 ---
+            valid_rows = [header_cells] + data_rows
+            
+            # 过滤全空列 (飞书常有 checkbox 列)
+            if valid_rows:
+                num_cols = len(header_cells)
+                # 检查每一列是否全空
+                cols_to_keep = []
+                for c in range(num_cols):
+                    has_content = False
+                    for r in valid_rows:
+                        if c < len(r) and r[c].strip():
+                            has_content = True
+                            break
+                    if has_content:
+                        cols_to_keep.append(c)
+                
+                # 重构行数据，只保留有效列
+                if len(cols_to_keep) < num_cols:
+                    new_valid_rows = []
+                    for r in valid_rows:
+                        new_row = [r[i] for i in cols_to_keep if i < len(r)]
+                        new_valid_rows.append(new_row)
+                    valid_rows = new_valid_rows
+
+            if len(valid_rows) < 2: continue
+            
+            # 生成 Markdown
+            max_cols = max(len(r) for r in valid_rows)
+            md_lines = []
+            
+            # 表头
+            header_line = valid_rows[0] + [''] * (max_cols - len(valid_rows[0]))
+            md_lines.append('| ' + ' | '.join(header_line) + ' |')
+            md_lines.append('| ' + ' | '.join(['---'] * max_cols) + ' |')
+            
+            # 内容
+            for row in valid_rows[1:]:
+                row += [''] * (max_cols - len(row))
+                md_lines.append('| ' + ' | '.join(row) + ' |')
+
+            table_md = '\n' + '\n'.join(md_lines) + '\n'
+            
+            placeholder_id = f"__TABLE_PLACEHOLDER_{table_index}__"
+            table_markdown_map[placeholder_id] = table_md
+            
+            placeholder_tag = soup.new_tag('div')
+            placeholder_tag['data-table-placeholder'] = placeholder_id
+            placeholder_tag.string = placeholder_id
+            
+            # 替换对象：这里非常关键
+            # 如果我们将整个 Grid 容器替换，会把后续的表格也替换掉
+            # 所以只能替换已处理的部分。
+            # 针对飞书，通常整个 Table View 是一个组件，替换整个组件是安全的
+            # 只要我们确定这个组件只包含一个表头
+            
+            target_to_replace = header_container.parent if header_container.parent else header_container
+            
+            # 标记已处理，防止重复
+            target_to_replace['data-table-processed'] = 'true'
+            target_to_replace.replace_with(placeholder_tag)
+            
+            table_index += 1
+            print(f"  [DEBUG] 提取表格 #{table_index}: {len(valid_rows)-1} 行 (已对齐优化)")
 
         # 3. 遍历块级元素
         block_tags = {'p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'li', 'blockquote', 'pre', 'div', 'section'}
         text_parts = []
 
         for element in main_content.find_all(list(block_tags)):
+            # --- 优先检查是否为表格占位符 ---
+            placeholder_id = element.get('data-table-placeholder')
+            if placeholder_id and placeholder_id in table_markdown_map:
+                # 直接插入预存的 Markdown 表格
+                text_parts.append(table_markdown_map[placeholder_id])
+                continue
+            
             # 过滤掉包含其他块级元素的容器 (只处理最底层的块)
             has_block_children = any(child.name in block_tags for child in element.find_all(recursive=False))
             if has_block_children:

@@ -23,7 +23,7 @@ DEFAULT_CONFIG = {
     # Playwright 配置
     "headless": True,       # 无头模式
     "concurrency": 2,        # 降低并发，模拟人类行为
-    "wait_until": "networkidle", # 使用 networkidle 确保 SPA 完全加载
+    "wait_until": "domcontentloaded", # 改用 domcontentloaded，因为飞书等SPA有持续网络活动
     "js_render_wait": 5.0,   # 增加等待时间，确保飞书完全渲染
     
     # ISO-8601 要排除的URL模式 (正则表达式)
