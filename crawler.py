@@ -71,47 +71,127 @@ class WebReader:
         # 注意: 即使使用了 Playwright，我们依然使用 BS4 进行文本清洗，
         # 因为它在处理 HTML 结构和去噪方面非常方便。
         soup = BeautifulSoup(html, 'lxml')
-        # DEBUG: Save the raw HTML to inspect why links are missing
-        debug_path = os.path.join(self.config['output_dir'], 'debug_page.html')
-        # 确保目录存在
-        os.makedirs(os.path.dirname(debug_path), exist_ok=True)
-        try:
-            with open(debug_path, 'w', encoding='utf-8') as f:
-               f.write(soup.prettify())
-        except Exception as e:
-            print(f"  [WARN] 无法保存调试HTML: {e}")
+
         settings = self.config['extract_settings']
 
-        # --- 核心修复: 提前提取链接 ---
-        # (防止 sidebar/nav 被 decompose 后连接丢失)
+        # --- 策略：构建全局文本链接映射 (Text -> URL) ---
+        # 飞书正文中的列表项往往没有 href，但左侧目录树里有。
+        # 我们利用左侧目录树的信息来"补全"正文中的死链接。
+        text_to_link_map = {}
+        # 为了避免误匹配，我们设定最小文本长度，并忽略太通用的词
+        for a in soup.find_all('a', href=True):
+            text = a.get_text(strip=True)
+            href = a['href']
+            # 只有当文本长度合适且不是纯数字/符号时才记录
+            if len(text) > 1 and not text.isdigit() and href:
+                # 飞书特定优化：侧边栏链接通常包含 token，这是高质量链接
+                full_href = normalize_url(href, url)
+                if full_href:
+                     text_to_link_map[text] = full_href
+        
+
+
+        # --- 1. 定位主要内容区域 (Main Content) ---
+        # 优先在去噪之前定位，以免删除了不该删的容器
+        main_content = None
+        
+        # 飞书等现代文档通常有明确的容器
+        # 调整策略：优先抓取最外层的内容容器，防止抓取局部
+        possible_selectors = [
+            '.doc-content',          # 飞书标准内容容器
+            '.article-content',      # 通用
+            '#doc-content',
+            '.main-content',
+            'main',
+            '[role="main"]',
+            '.render-unit-wrapper',  # 降级：如果上面的都没找到，再试这个
+            'article'
+        ]
+        
+        for selector in possible_selectors:
+            main_content = soup.select_one(selector)
+            if main_content:
+
+                break
+        
+        # 降级策略: 如果找不到特定容器，使用 body，但尝试排除 sidebar
+        if not main_content:
+            main_content = soup.find('body') or soup
+
+
+        # --- 2. 从 Main Content 提取链接 ---
+        # 仅提取正文内的链接，避免抓取侧边栏/导航栏
         links = []
-        raw_links = soup.find_all('a', href=True)
-        print(f"  [DEBUG] 页面含有 {len(raw_links)} 个原始链接标签 (Before Cleanup)")
+        raw_links = []
+        if main_content:
+            # 标准链接
+            raw_links.extend(main_content.find_all('a', href=True))
+            # 隐式链接 (data-href / data-url) - 飞书等SPA常用
+            raw_links.extend(main_content.select('[data-href], [data-url]'))
+            
+            # --- 关键修复: 将文本映射的链接也加入待抓取队列 ---
+            # 因为我们在生成 Markdown 时会把匹配 map 的纯文本变成链接
+            # 所以这里也必须把它们加入队列，否则只会生成链接却不会去爬
+            for text_node in main_content.find_all(string=True):
+                stripped = text_node.strip()
+                if len(stripped) > 1 and stripped in text_to_link_map:
+                    # 避免重复添加 (虽然 links 后续会去重，但为了效率)
+                    # 注意：raw_links 是 Tag 列表，这里我们直接把 URL 加到 links 里可能更好
+                    # 但为了保持逻辑统一，我们在下面的循环里处理
+                    pass
+        else:
+            raw_links.extend(soup.find_all('a', href=True))
+            raw_links.extend(soup.select('[data-href], [data-url]'))
+            
+
         
         valid_links_count = 0
-        for a in raw_links:
-            href = normalize_url(a['href'], url)
+        
+        # 1. 处理 Tag 链接
+        for tag in raw_links:
+            url_val = tag.get('href') or tag.get('data-href') or tag.get('data-url')
+            if not url_val: continue
+            
+            href = normalize_url(url_val, url)
             if href:
                 links.append(href)
                 valid_links_count += 1
-        print(f"  [DEBUG] 标准化后有效链接: {len(links)} 个")
-        # ---------------------------
+        
+        # 2. 处理文本补全链接 (仅在 main_content 模式下)
+        if main_content:
+            for text_node in main_content.find_all(string=True):
+                stripped = text_node.strip()
+                if len(stripped) > 1 and stripped in text_to_link_map:
+                    target_url = text_to_link_map[stripped]
+                    if target_url not in links: # 简单去重
+                        links.append(target_url)
+                        valid_links_count += 1
+                        
+
+
+        # --- 3. 去除噪音元素 (仅在 main_content 内部操作，如果我们没复制 main_content) ---
+        # 注意: 如果 main_content 只是 soup 的一部分引用，decompose 会影响 soup，也会影响 main_content
         
         # 移除不需要的标签
         if settings['remove_scripts']:
-            for script in soup.find_all('script'):
+            for script in main_content.find_all('script'):
                 script.decompose()
         
         if settings['remove_styles']:
-            for style in soup.find_all('style'):
+            for style in main_content.find_all('style'):
                 style.decompose()
         
         if settings['remove_comments']:
-            for comment in soup.find_all(string=lambda text: isinstance(text, Comment)):
+            for comment in main_content.find_all(string=lambda text: isinstance(text, Comment)):
                 comment.extract()
         
-        # 移除导航、页脚等非正文区域
-        for tag in soup.find_all(['nav', 'footer', 'header', 'aside', 'iframe', 'noscript']):
+        # 移除导航、页脚等非正文区域 (通常正文容器里不应该包含这些，但防万一)
+        # 注意：不要删除 div，否则可能把内容删了
+        for tag in main_content.find_all(['nav', 'footer', 'header', 'aside', 'iframe', 'noscript']):
+            # 飞书有时候用 header 做标题容器，所以要小心
+            # 如果是 header 且包含 h1/h2，可能有用，保留
+            if tag.name == 'header' and tag.find(['h1', 'h2']):
+                continue
             tag.decompose()
         
         # 提取标题
@@ -119,68 +199,69 @@ class WebReader:
         title_tag = soup.find('title')
         if title_tag:
             title = title_tag.get_text(strip=True)
-        
-        # 提取正文 - 优先查找主要内容区域
-        main_content = None
-        # 添加针对飞书 (.doc-body, .isv-doc-body) 和其他文档站点的选择器
-        feishu_selectors = [
-             '.doc-content', '.document-content', '.suite-wiki-content', 
-             '.render-unit-wrapper', '.isv-doc-body', '.catalogue-content'
-        ]
-        common_selectors = ['main', 'article', '[role="main"]', '.content', '.main-content', '#content', '#main']
-        
-        for selector in feishu_selectors + common_selectors:
-            main_content = soup.select_one(selector)
-            if main_content:
-                print(f"  [DEBUG] 找到内容容器: {selector}")
-                break
-        
-        if not main_content:
-            main_content = soup.find('body') or soup
-        
+            
         # 2. 辅助函数：处理行内元素，保留格式 (前置定义，供表格使用)
         def process_node(node):
             if isinstance(node, str):
+                # 尝试对纯文本进行链接补全
+                stripped = node.strip()
+                if stripped in text_to_link_map:
+                    return f"[{node}]({text_to_link_map[stripped]})"
                 return node
             
             # 忽略隐藏元素
             if node.name in ['style', 'script', 'noscript', 'iframe']:
                 return ''
             
+            # --- 安全优化: 忽略飞书列表的显式序号 ---
+            # 因为我们在 Markdown 列表输出时会自动带上序号
+            if node.name == 'div' and 'order' in node.get('class', []):
+                 # 确保只过滤纯序号 (如 "1.")
+                 txt = node.get_text(strip=True)
+                 if re.match(r'^\d+\.?$', txt):
+                     return ''
+            
             content = ''
-            for child in node.children:
-                content += process_node(child)
-            
-            # 处理粗体/斜体/代码/链接
-            if not content.strip():
-                return ''
+            if hasattr(node, 'children'):
+                for child in node.children:
+                    content += process_node(child)
                 
-            if node.name in ['b', 'strong']:
-                return f" **{content.strip()}** "
-            if node.name in ['i', 'em']:
-                return f" *{content.strip()}* "
-            if node.name == 'code':
-                return f" `{content.strip()}` "
-            if node.name == 'a' and node.get('href'):
-                href = node['href']
-                if not href.startswith('javascript'):
-                    return f" [{content.strip()}]({href}) "
-                return content
+            # 处理链接
+            href = None
+            if node.name == 'a':
+                href = node.get('href')
+            elif node.has_attr('data-href'):
+                href = node.get('data-href')
+            elif node.has_attr('data-url'):
+                href = node.get('data-url')
             
+            # 补全策略：如果节点本身没有链接，但其纯文本内容在映射表中
+            if not href and content.strip() in text_to_link_map:
+                href = text_to_link_map[content.strip()]
+                
+            if href:
+                full_url = normalize_url(href, url)
+                if full_url and content.strip():
+                    if not full_url.startswith('javascript:'):
+                        return f"[{content.strip()}]({full_url})"
+                    else:
+                        return content
+            
+            # 处理加粗、斜体等
+            if node.name in ['strong', 'b']:
+                return f"**{content.strip()}**"
+            if node.name in ['em', 'i']:
+                return f"*{content.strip()}*"
+            if node.name == 'code':
+                return f"`{content.strip()}`"
+            if node.name == 'br':
+                return "\n"
+                
             return content
 
         # 1. 表格处理 (增强版：支持标准 Table 和 ARIA Grid/Table)
         
-        # --- 飞书列表视图探测 (临时调试) ---
-        owner_span = main_content.find(string=re.compile("所有者"))
-        if owner_span:
-            print(f"  [DEBUG] 找到 '所有者' 文本节点")
-            parent = owner_span.parent
-            for i in range(5):
-                if parent:
-                    print(f"    Parent-{i}: {parent.name} class={parent.get('class')} role={parent.get('role')}")
-                    parent = parent.parent
-        # --------------------------------
+
         
         # 预先提取所有表格，用占位符替换
         table_markdown_map = {}  # 占位符 ID -> Markdown 表格内容
@@ -296,20 +377,19 @@ class WebReader:
             # 尝试一：header_container 的下一个兄弟是 Body
             next_sibling = header_container.find_next_sibling()
             rows_container = None
+            is_independent_body = False
             
             if next_sibling:
                 # 可能是 Body 容器
-                if 'table-view-body' in str(next_sibling.get('class', [])) or \
-                   'table-body' in str(next_sibling.get('class', [])):
+                classes = str(next_sibling.get('class', []))
+                if 'table-view-body' in classes or 'table-body' in classes:
                     rows_container = next_sibling
+                    is_independent_body = True
                 # 或者直接就是 Row (如果是一个扁平列表)
-                elif 'table-view-row' in str(next_sibling.get('class', [])):
-                    # 如果直接是 row，我们需要收集所有连续的 row
-                    # 这比较复杂，暂且假设有一个容器
+                elif 'table-view-row' in classes:
                     rows_container = next_sibling.parent 
             
             # 如果没找到明确的 Body，尝试在 header_container 的父级中查找所有 rows
-            # 并且通过位置判断（必须在 header 之后）
             if not rows_container:
                 rows_container = header_container.parent
                 
@@ -320,7 +400,6 @@ class WebReader:
                 # 去重：过滤掉嵌套的 row (只保留最顶层的 row)
                 all_possible_rows = []
                 for row in raw_rows_selection:
-                    # 检查父级链中是否有其他 row
                     is_nested = False
                     parent = row.parent
                     while parent and parent != rows_container:
@@ -328,32 +407,44 @@ class WebReader:
                             is_nested = True
                             break
                         parent = parent.parent
-                    
                     if not is_nested:
                         all_possible_rows.append(row)
                 
-                # 找到下一个表头的位置 (用于截断)
+                # 找到下一个表头的位置 (用于截断 - 仅当多个表格平铺在同一个容器时需要)
                 current_header_idx = headers.index(header_row)
                 next_header_row = headers[current_header_idx + 1] if current_header_idx + 1 < len(headers) else None
                 
-                # 过滤：只保留在 header_row *之后* 的 row
-                # 并且不能属于下一个 header (防止把下一个表格的行也抓进来)
+                # 过滤逻辑
                 for row in all_possible_rows:
-                    # 必须在 header 后面
-                    if row.sourceline and header_row.sourceline and row.sourceline <= header_row.sourceline:
-                        continue
+                    # 1. 前置检查 (仅当 Header 和 Row 混在一个容器时需要)
+                    if not is_independent_body:
+                        # 如果行号存在且小于表头行号，跳过
+                        if row.sourceline and header_row.sourceline and row.sourceline < header_row.sourceline:
+                            continue
+                        # 如果行号相同 (压缩HTML)，我们需要确保它是文档中的后继节点
+                        # 简单起见，既然已经用了 select (文档顺序)，只要它不是 header 及其祖先即可
+                        # 这里我们假设 select 顺序正确，如果不做 sourceline 检查，默认就是后面的
+                        pass
                     
-                    # 关键修复：如果行在下一个表头之后，说明属于下一个表格，停止收集
-                    if next_header_row and row.sourceline and next_header_row.sourceline and row.sourceline >= next_header_row.sourceline:
-                        break
+                    # 2. 截断检查 (防止吞掉下一个表格)
+                    # 只有当下一个 header 也在这个 container 里时才需要截断
+                    if next_header_row:
+                        # 检查下一个 header 是否也在当前的 rows_container 里 (或是其后代)
+                        # 如果 next_header 在这里，那我们需要在遇到它之前停止
+                        if next_header_row in rows_container.descendants or next_header_row == rows_container:
+                             if row.sourceline and next_header_row.sourceline and row.sourceline >= next_header_row.sourceline:
+                                break
                     
                     # 提取单元格 (同样应用非递归策略)
                     row_cells = []
+                    cell_idx = 0
                     for child in row.find_all(recursive=False):
                         classes = str(child.get('class', []))
                         if 'table-view-cell' in classes or \
                            child.get('role') in ['cell', 'gridcell']:
+                            
                             row_cells.append(process_node(child).strip().replace('\n', ' ').replace('|', '\\|'))
+                            cell_idx += 1
                     
                     # Fallback (同 Header)
                     if not row_cells:
@@ -433,22 +524,111 @@ class WebReader:
             target_to_replace.replace_with(placeholder_tag)
             
             table_index += 1
-            print(f"  [DEBUG] 提取表格 #{table_index}: {len(valid_rows)-1} 行 (已对齐优化)")
+
 
         # 3. 遍历块级元素
         block_tags = {'p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'li', 'blockquote', 'pre', 'div', 'section'}
         text_parts = []
+        processed_elements = set()
 
         for element in main_content.find_all(list(block_tags)):
+            if element in processed_elements:
+                continue
+                
             # --- 优先检查是否为表格占位符 ---
             placeholder_id = element.get('data-table-placeholder')
             if placeholder_id and placeholder_id in table_markdown_map:
                 # 直接插入预存的 Markdown 表格
                 text_parts.append(table_markdown_map[placeholder_id])
+                # 表格是一个整体，其内部元素不需要再遍历
+                for child in element.find_all():
+                    processed_elements.add(child)
                 continue
             
             # 过滤掉包含其他块级元素的容器 (只处理最底层的块)
+            # EXCEPTION: 代码块通常包含多行 div/p，但必须作为整体处理
+            # 所以我们需要先检查是不是代码块容器
+            
+            # --- 核心优化: 识别飞书伪标题/代码块 ---
+            classes = element.get('class', [])
+            class_str = ' '.join(classes).lower()
+            
+            # 向上查找 data-block-type (针对飞书桌面端 DOM 结构)
+            block_type = ''
+            parent_block = element.find_parent(lambda tag: tag.has_attr('data-block-type'))
+            if parent_block:
+                block_type = parent_block.get('data-block-type', '')
+            
+            # --- 新增: 代码块处理 ---
+            # 1. 标准 pre 标签
+            # 2. 飞书 code block (data-block-type="code")
+            # 3. 必须是代码块的 ROOT 容器，防止处理每一行
+            is_code_block = False
+            if element.name == 'pre' or \
+               (block_type == 'code' and 'code-block' in class_str and 'code-block-content' not in class_str) or \
+               ('code-block' in class_str and 'code-block-content' not in class_str):
+                is_code_block = True
+            
+            # 如果仅仅是 block_type == 'code'，可能是内部的行，我们需要找到最外层的容器
+            # 这里的逻辑比较微妙：find_all 会先返回父级，再返回子级吗？
+            # BS4 find_all 是按文档顺序。父级先于子级。
+            # 所以只要我们处理了父级并标记了子级，就不会重复处理。
+            
+            if is_code_block:
+                code_content = element.get_text(separator='\n')
+                # 尝试提取语言
+                lang = ''
+                # 飞书通常在父级或自身 class 里有 language-xxx
+                for cls in classes:
+                    if cls.startswith('language-'):
+                        lang = cls.replace('language-', '')
+                        break
+                if not lang and parent_block:
+                     for cls in parent_block.get('class', []):
+                        if cls.startswith('language-'):
+                            lang = cls.replace('language-', '')
+                            break
+                
+                # 精确提取: 尝试找 code 标签或 .code-block-content
+                # 这样可以去除行号等噪音
+                content_container = element.select_one('.code-block-content, code')
+                if content_container:
+                     # 智能换行策略：
+                     # 1. 优先识别飞书/AceEditor 的行结构 (.ace-line)
+                     ace_lines = content_container.select('.ace-line')
+                     if ace_lines:
+                         lines = []
+                         for line in ace_lines:
+                             # get_text() 默认合并所有子节点文本，不加换行，
+                             # 这正是我们想要的：保持行内高亮元素(span)紧凑连接
+                             lines.append(line.get_text())
+                         code_content = '\n'.join(lines)
+                     else:
+                         # 2. 备用：尝试直接子 div (其他编辑器结构)
+                         rows = content_container.find_all('div', recursive=False)
+                         if rows:
+                             lines = []
+                             for row in rows:
+                                 lines.append(row.get_text())
+                             code_content = '\n'.join(lines)
+                         else:
+                             # 3. Fallback: 纯文本或 pre>code
+                             code_content = content_container.get_text()
+                else:
+                    # Fallback (没有找到 content 容器)
+                    code_content = element.get_text()
+                
+                final_text = f"\n```{lang}\n{code_content}\n```\n"
+                text_parts.append(final_text)
+                
+                # 标记所有后代为已处理，防止拆分
+                for child in element.find_all():
+                    processed_elements.add(child)
+                continue 
+
+            # 对于非代码块，保持原来的“只处理最底层块”逻辑
             has_block_children = any(child.name in block_tags for child in element.find_all(recursive=False))
+            # 如果有子块（且不是代码块），说明它是容器，跳过它，等遍历到子块再说
             if has_block_children:
                 continue
             
@@ -462,16 +642,6 @@ class WebReader:
             if len(rich_text) < 2:
                 continue
 
-            # --- 核心优化: 识别飞书伪标题 ---
-            classes = element.get('class', [])
-            class_str = ' '.join(classes).lower()
-            
-            # 向上查找 data-block-type (针对飞书桌面端 DOM 结构)
-            block_type = ''
-            parent_block = element.find_parent(lambda tag: tag.has_attr('data-block-type'))
-            if parent_block:
-                block_type = parent_block.get('data-block-type', '')
-            
             # --- 噪音过滤 ---
             blacklist = ["附件不支持打印", "文档链接直达", "评论区", "更多分类内容", "前往语雀", "扫码登录", "转到元文档"]
             if any(noise in rich_text for noise in blacklist):
@@ -498,6 +668,10 @@ class WebReader:
                 final_text = f"- {rich_text}"
             elif block_type == 'ordered':
                 final_text = f"1. {rich_text}"
+            elif block_type == 'todo' or 'todo-item' in class_str: # 待办事项
+                 final_text = f"- [ ] {rich_text}"
+            elif block_type == 'quote' or 'quote-block' in class_str: # 引用
+                 final_text = f"> {rich_text}"
             elif element.name == 'blockquote' or block_type == 'quote':
                 final_text = f"> {rich_text}"
             elif element.name == 'pre' or block_type == 'code':
@@ -580,7 +754,7 @@ class WebReader:
                     full_height = full_height or await page.evaluate("document.body.scrollHeight")
                     
                     if full_height > 0:
-                         print(f"  [DEBUG] 页面真实高度: {full_height}px, 执行视口扩张...")
+
                          target_height = min(full_height + 2000, 30000) # 多加2000冗余
                          await page.set_viewport_size({"width": 1920, "height": target_height})
                          await asyncio.sleep(3) # 视口变大后，React 需要时间重绘
@@ -626,24 +800,47 @@ class WebReader:
                                 await page.set_viewport_size({"width": 1920, "height": new_height + 500})
                              except: pass
                         
-                    if i % 10 == 0:
-                        print(f"  [DEBUG] 滚动中... ({i}/50)")
+
 
                 print("  [INFO] 全量渲染处理完成")
+                
+                # --- 关键修复: 滚回顶部 ---
+                # 很多虚拟滚动列表在滚到底部后，会卸载顶部的 DOM 以节省内存。
+                # 我们必须滚回顶部，确保开头的章节 (1.1, 1.2) 被重新渲染。
+                # 由于我们前面扩大了 viewport，理论上滚回顶部后，只要高度够大，
+                # 应该能同时保留顶部和中间的内容 (如果内存允许)。
+                print("  [DEBUG] 正在滚回顶部以重新渲染首屏内容...")
+                
+                # --- 智能滚顶: 查找真实滚动容器 ---
+                # 很多应用(如飞书)是 div 滚动而不是 window 滚动
+                await page.evaluate("""() => {
+                    window.scrollTo(0, 0);
+                    
+                    // 找到所有可滚动的元素
+                    const scrollables = [];
+                    document.querySelectorAll('*').forEach(el => {
+                        if (el.scrollHeight > el.clientHeight && el.clientHeight > 0) {
+                            scrollables.push(el);
+                        }
+                    });
+                    
+                    // 假设最大的那个是主滚动区
+                    if (scrollables.length > 0) {
+                        scrollables.sort((a, b) => b.scrollHeight - a.scrollHeight);
+                        scrollables[0].scrollTo(0, 0);
+                        console.log('Scrolled container:', scrollables[0].className);
+                    }
+                }""")
+                await asyncio.sleep(2.0)
+                
+
                 
                 # 3. 再次等待 JS 渲染
                 js_wait = self.config.get('js_render_wait', 1.0)
                 if js_wait > 0:
                     await asyncio.sleep(js_wait)
                 
-                # Debug: Check link count in browser context
-                link_count = await page.evaluate("document.querySelectorAll('a').length")
-                print(f"  [DEBUG] Browser sees {link_count} <a> tags")
 
-                # Debug: Check full text
-                # full_text = await page.evaluate("document.body.innerText")
-                # with open("debug_text.txt", "w", encoding="utf-8") as f:
-                #    f.write(full_text)
 
                 content = await page.content()
                 return content

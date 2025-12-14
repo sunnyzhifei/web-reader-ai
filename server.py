@@ -82,17 +82,14 @@ async def _crawl_logic(task_id: str, req: CrawlRequest, is_preview: bool):
 
 # 线程包装器：为 Windows 设置 Proactor 并运行异步循环
 def run_crawl_thread(task_id: str, req: CrawlRequest, is_preview: bool):
-    print(f"DEBUG: Thread started for {task_id}")
+    print(f"Starts crawling thread for task {task_id}...")
     import traceback
     
     if sys.platform == 'win32':
-        print("DEBUG: Setting WindowsProactorEventLoopPolicy")
         asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
     
     try:
-        print("DEBUG: Entering asyncio.run")
         asyncio.run(_crawl_logic(task_id, req, is_preview))
-        print("DEBUG: asyncio.run completed")
     except Exception as e:
         print(f"THREAD ERROR: {repr(e)}")
         traceback.print_exc()

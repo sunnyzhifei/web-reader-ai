@@ -38,32 +38,50 @@ def normalize_url(url: str, base_url: str = None) -> Optional[str]:
     return url if url.startswith(('http://', 'https://')) else None
 
 
-def get_domain(url: str) -> str:
+def get_domain(url: str, extract_root: bool = False) -> str:
     """
     从URL中提取域名
     
     Args:
         url: 完整URL
+        extract_root: 是否提取根域名（去掉子域名前缀）
     
     Returns:
         域名字符串
     """
     parsed = urlparse(url)
-    return parsed.netloc
+    netloc = parsed.netloc
+    
+    if extract_root and netloc:
+        # 提取根域名 (如 ai.feishu.cn -> feishu.cn)
+        # 处理特殊情况：一些顶级域名有两部分（如 .co.uk, .com.cn）
+        parts = netloc.split('.')
+        if len(parts) >= 2:
+            # 检查是否是常见的双后缀顶级域名
+            double_tlds = ['com.cn', 'net.cn', 'org.cn', 'gov.cn', 'co.uk', 'co.jp', 'com.au']
+            if len(parts) >= 3 and '.'.join(parts[-2:]) in double_tlds:
+                return '.'.join(parts[-3:])  # 如 xxx.com.cn -> xxx.com.cn
+            else:
+                return '.'.join(parts[-2:])  # 如 ai.feishu.cn -> feishu.cn
+    
+    return netloc
 
 
 def is_same_domain(url1: str, url2: str) -> bool:
     """
-    检查两个URL是否属于同一域名
+    检查两个URL是否属于同一域名（基于根域名匹配）
+    
+    这个函数会提取根域名进行比较，以便同一主站下的不同子域名
+    （如 ai.feishu.cn 和 dye87dshnj.feishu.cn）都会被视为同域名。
     
     Args:
         url1: 第一个URL
         url2: 第二个URL
     
     Returns:
-        是否同域名
+        是否同域名（根域名相同）
     """
-    return get_domain(url1) == get_domain(url2)
+    return get_domain(url1, extract_root=True) == get_domain(url2, extract_root=True)
 
 
 def should_exclude_url(url: str, patterns: List[str]) -> bool:
