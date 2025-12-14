@@ -2,6 +2,7 @@
 import sys
 import asyncio
 import threading
+from datetime import datetime
 from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -38,11 +39,18 @@ class CrawlRequest(BaseModel):
 # 实际的异步抓取逻辑
 async def _crawl_logic(task_id: str, req: CrawlRequest, is_preview: bool):
     try:
+        # 生成基于时间的目录名 (例如: crawl_20240520_120000)
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        # 为了防止极其罕见的秒级冲突，可以加上 task_id 前4位，但在单人使用场景下纯时间更清爽
+        # 这里我们只用时间，如果需要区分多次点击，可以等一秒
+        output_dir_name = f"crawl_{timestamp}"
+        output_dir_path = f"output/{output_dir_name}"
+
         config = {
             "max_depth": req.max_depth,
             "max_pages": min(req.max_pages, 3) if is_preview else req.max_pages,
             "headless": True,
-            "output_dir": f"output/{task_id}"
+            "output_dir": output_dir_path
         }
         
         reader = WebReader(config)
@@ -69,9 +77,9 @@ async def _crawl_logic(task_id: str, req: CrawlRequest, is_preview: bool):
             tasks[task_id]["preview_data"] = preview_list
             tasks[task_id]["status"] = "completed"
         else:
-            output_dir = f"output/{task_id}"
-            reader.save_results(output_dir)
-            tasks[task_id]["result_dir"] = output_dir
+            # 使用前面生成的时间戳目录
+            reader.save_results(output_dir_path)
+            tasks[task_id]["result_dir"] = output_dir_path
             tasks[task_id]["status"] = "completed"
             
     except Exception as e:
