@@ -13,6 +13,7 @@ from datetime import datetime
 from fake_useragent import UserAgent
 from asyncio import Semaphore
 from playwright.async_api import async_playwright, Page, BrowserContext
+import inspect
 
 from config import DEFAULT_CONFIG
 from utils import (
@@ -423,8 +424,14 @@ class WebReader:
         # 标记已访问
         self.visited_urls.add(url)
         
-        # 打印进度
-        print_progress(len(self.visited_urls), self.config['max_pages'], url, depth)
+        # 进度回调
+        if self.on_progress:
+            if inspect.iscoroutinefunction(self.on_progress):
+                await self.on_progress(len(self.visited_urls), self.config['max_pages'], url, depth)
+            else:
+                self.on_progress(len(self.visited_urls), self.config['max_pages'], url, depth)
+        else:
+            print_progress(len(self.visited_urls), self.config['max_pages'], url, depth)
         
         # 获取内容
         html = await self._fetch_page(context, sem, url)
@@ -471,11 +478,16 @@ class WebReader:
         if tasks:
             await asyncio.gather(*tasks)
     
-    async def crawl(self, start_url: str) -> List[Dict[str, Any]]:
+    async def crawl(self, start_url: str, on_progress=None) -> List[Dict[str, Any]]:
         """
         开始抓取
+        Args:
+            start_url: 起始URL
+            on_progress: 进度回调函数 (curr, total, url, depth)
         """
         self.start_url = normalize_url(start_url) # Record for ordered saving
+        self.on_progress = on_progress
+        
         print(f"\n[INFO] 开始抓取 (Playwright模式): {start_url}")
         print(f"   配置: 最大深度={self.config['max_depth']}, 最大页面数={self.config['max_pages']}")
         print(f"   无头模式: {self.config.get('headless', True)}")
@@ -529,9 +541,10 @@ class WebReader:
         output_format = self.config['output_format']
         ext = {'markdown': '.md', 'json': '.json', 'txt': '.txt'}[output_format]
         
-        print(f"[INFO] 保存到: {output_dir}")
-        
-        # --- 重建顺序 (DFS) ---
+    def get_ordered_results(self):
+        """
+        获取排序后的结果列表 (不保存)
+        """
         ordered_results = []
         visited_in_sort = set()
         
@@ -554,10 +567,38 @@ class WebReader:
         if hasattr(self, 'start_url') and self.start_url:
              dfs_collect(self.start_url)
         
-        # 兜底：如果有孤立页面（虽然理论上递归抓取不该有），也加上
+        # 兜底：如果有孤立页面
         for c in self.results:
             if c['url'] not in visited_in_sort:
                 ordered_results.append(c)
+                
+        return ordered_results
+
+    def save_results(self, output_dir: str = None):
+        """
+        保存抓取结果，并执行本地链接替换
+        (支持保序：按 DFS 顺序生成文件名)
+        """
+        from utils import create_output_dir
+        
+        if not self.results:
+            print("[WARN]  没有可保存的内容")
+            return
+        
+        output_dir = output_dir or create_output_dir(self.config['output_dir'])
+        
+        # 确保目录存在 (针对手动传入路径的情况)
+        import os
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir, exist_ok=True)
+            
+        output_format = self.config['output_format']
+        ext = {'markdown': '.md', 'json': '.json', 'txt': '.txt'}[output_format]
+        
+        print(f"[INFO] 保存到: {output_dir}")
+        
+        # --- 重建顺序 (DFS) ---
+        ordered_results = self.get_ordered_results()
         
         print(f"[INFO] 已按阅读顺序重排结果: {len(self.results)} -> {len(ordered_results)}")
         # ---------------------

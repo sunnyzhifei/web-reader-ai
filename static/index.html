@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Web Reader AI | 智能网页采集</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;700&display=swap" rel="stylesheet">
+</head>
+
+<body>
+    <div class="bg-decoration"></div>
+
+    <div class="glass-container">
+        <header>
+            <div class="logo">🕸️ Web Reader AI</div>
+            <p>基于 Playwright 的高保真递归网页阅读器</p>
+        </header>
+
+        <form onsubmit="return false;">
+            <div class="input-group">
+                <label for="url">🎯 起始 URL</label>
+                <input type="url" id="url" placeholder="https://example.com/wiki"
+                    value="https://ai.feishu.cn/wiki/V7J1w3MEPiZdtdkfhFAcOCnJnEh" required>
+            </div>
+
+            <div class="row">
+                <div class="input-group half">
+                    <label for="max-depth">🌊 最大深度</label>
+                    <input type="number" id="max-depth" value="1" min="0" max="5">
+                </div>
+                <div class="input-group half">
+                    <label for="max-pages">📑 最大页面数</label>
+                    <input type="number" id="max-pages" value="50" min="1" max="1000">
+                </div>
+            </div>
+
+            <div class="actions">
+                <button id="btn-preview" class="btn secondary">
+                    预览 (Preview)
+                </button>
+                <button id="btn-start" class="btn primary">
+                    开始抓取 (Start)
+                </button>
+                <button id="btn-download" class="btn success" disabled>
+                    下载结果 (Download)
+                </button>
+            </div>
+        </form>
+
+        <!-- 状态监控 -->
+        <div id="monitor" class="monitor hidden">
+            <div class="monitor-header">
+                <span id="status-badge" class="badge running">Running</span>
+                <span id="progress-text">0/0</span>
+            </div>
+            <div class="progress-track">
+                <div id="progress-bar" class="progress-fill" style="width: 0%"></div>
+            </div>
+            <div id="current-url" class="current-url">Waiting to start...</div>
+        </div>
+
+        <!-- 预览结果 -->
+        <div id="preview-panel" class="preview-panel hidden">
+            <h3>📑 预览结果 (Top 5)</h3>
+            <div id="preview-cards" class="preview-cards">
+                <!-- Cards injected here -->
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/app.js"></script>
+</body>
+
+</html>
