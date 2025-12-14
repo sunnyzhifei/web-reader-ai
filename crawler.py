@@ -53,9 +53,28 @@ class WebReader:
         """
         self.config = {**DEFAULT_CONFIG, **(config or {})}
         self.visited_urls: Set[str] = set()
+        self.visited_keys: Set[str] = set() # 用于去重 (主域名+路径)
+        self.completed_count: int = 0
         self.results: List[Dict[str, Any]] = []
         self.link_tree: Dict[str, List[str]] = {} # 记录页面链接结构，用于保序
         self.ua = UserAgent()
+
+    def _get_unique_key(self, url: str) -> str:
+        """
+        生成用于去重的唯一Key
+        - 对于 飞书/Lark: 忽略子域名和查询参数，只看 Path (根域名+路径)
+        - 对于 其他网站: 使用完整 URL (包含子域名和查询参数)
+        这样既解决了飞书的重复抓取问题，又不会破坏依赖 query 参数的普通网站。
+        """
+        root_domain = get_domain(url, extract_root=True)
+        parsed = urlparse(url)
+        
+        # 针对飞书/Lark 的特定优化
+        if root_domain in ['feishu.cn', 'larksuite.com']:
+            return f"{root_domain}{parsed.path}"
+            
+        # 通用策略：完整 URL (已在 normalize_url 中去除了 hash 和 trailing slash)
+        return url
         
     def _extract_text(self, html: str, url: str) -> Dict[str, Any]:
         """
@@ -205,6 +224,14 @@ class WebReader:
             if isinstance(node, str):
                 # 尝试对纯文本进行链接补全
                 stripped = node.strip()
+                
+                # 防止在已经是链接的情况下重复添加 (双重链接问题)
+                # 必须检查所有祖先节点，不仅仅是直接父级 (例如 <a><span>Text</span></a>)
+                # 同时也要检查 data-href/data-url 的容器，因为它们也会被处理成链接
+                is_link_container = lambda tag: tag.name == 'a' or tag.has_attr('data-href') or tag.has_attr('data-url')
+                if node.find_parent(is_link_container):
+                    return node
+                
                 if stripped in text_to_link_map:
                     return f"[{node}]({text_to_link_map[stripped]})"
                 return node
@@ -235,15 +262,22 @@ class WebReader:
             elif node.has_attr('data-url'):
                 href = node.get('data-url')
             
+            # --- 双重链接防护 (第一道防线) ---
+            # 如果子内容已经是链接格式，不要再做任何链接处理
+            stripped_content = content.strip()
+            contains_link = bool(re.search(r'\[.+\]\(.+\)', stripped_content))
+            if contains_link:
+                return stripped_content
+            
             # 补全策略：如果节点本身没有链接，但其纯文本内容在映射表中
-            if not href and content.strip() in text_to_link_map:
-                href = text_to_link_map[content.strip()]
+            if not href and stripped_content in text_to_link_map:
+                href = text_to_link_map[stripped_content]
                 
             if href:
                 full_url = normalize_url(href, url)
-                if full_url and content.strip():
+                if full_url and stripped_content:
                     if not full_url.startswith('javascript:'):
-                        return f"[{content.strip()}]({full_url})"
+                        return f"[{stripped_content}]({full_url})"
                     else:
                         return content
             
@@ -870,9 +904,11 @@ class WebReader:
             return
         
         url = normalize_url(url)
-        if not url or url in self.visited_urls:
+        # 检查是否已访问 (使用唯一Key)
+        unique_key = self._get_unique_key(url)
+        if unique_key in self.visited_keys:
             return
-        
+            
         # 检查域名和排除规则
         if self.config['same_domain_only'] and not is_same_domain(url, f"https://{start_domain}"):
             return
@@ -880,26 +916,39 @@ class WebReader:
             return
         
         # 标记已访问
-        self.visited_urls.add(url)
+        self.visited_urls.add(url) # 记录原始URL用于展示
+        self.visited_keys.add(unique_key) # 记录Key用于去重
         
-        # 进度回调
-        if self.on_progress:
-            if inspect.iscoroutinefunction(self.on_progress):
-                await self.on_progress(len(self.visited_urls), self.config['max_pages'], url, depth)
-            else:
-                self.on_progress(len(self.visited_urls), self.config['max_pages'], url, depth)
-        else:
-            print_progress(len(self.visited_urls), self.config['max_pages'], url, depth)
-        
+        # 移除了此处的进度回调，改为在处理完成后回调，确保进度条"从0开始，完成一个涨一个"
+
         # 获取内容
         html = await self._fetch_page(context, sem, url)
         if not html:
+            # 即使失败也算完成一个任务
+            self.completed_count += 1
+            if self.on_progress:
+                if inspect.iscoroutinefunction(self.on_progress):
+                    await self.on_progress(self.completed_count, self.config['max_pages'], url, depth)
+                else:
+                    self.on_progress(self.completed_count, self.config['max_pages'], url, depth)
+            else:
+                 print_progress(self.completed_count, self.config['max_pages'], url, depth)
             return
         
         # 提取数据
         content = self._extract_text(html, url)
         if content['text']:
             self.results.append(content)
+            
+        # 页面处理完成 (成功) -> 增加进度
+        self.completed_count += 1
+        if self.on_progress:
+            if inspect.iscoroutinefunction(self.on_progress):
+                await self.on_progress(self.completed_count, self.config['max_pages'], url, depth)
+            else:
+                self.on_progress(self.completed_count, self.config['max_pages'], url, depth)
+        else:
+             print_progress(self.completed_count, self.config['max_pages'], url, depth)
         
         # 延迟 (Playwright模式下通常也不需要太长时间，因为本身就很慢)
         delay = self.config.get('delay', 1.0)
