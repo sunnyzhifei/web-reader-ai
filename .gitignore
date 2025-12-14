@@ -15,6 +15,10 @@ downloads/
 .vscode/
 .idea/
 
+# Logs
+*.log
+server.log
+
 # System
 .DS_Store
 Thumbs.db
