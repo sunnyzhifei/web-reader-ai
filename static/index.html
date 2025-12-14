@@ -4,74 +4,113 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Web Reader AI | 智能网页采集</title>
+    <title>Web Reader AI</title>
+    <link rel="icon"
+        href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none'%3E%3Cpath d='M12 2L2 7L12 12L22 7L12 2Z' stroke='%2338bdf8' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3Cpath d='M2 17L12 22L22 17' stroke='%2338bdf8' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3Cpath d='M2 12L12 17L22 12' stroke='%2338bdf8' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
     <link rel="stylesheet" href="/static/style.css">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;700&display=swap" rel="stylesheet">
+    <!-- Marked.js for Markdown rendering -->
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 </head>
 
 <body>
     <div class="bg-decoration"></div>
 
-    <div class="glass-container">
-        <header>
-            <div class="logo">🕸️ Web Reader AI</div>
-            <p>基于 Playwright 的高保真递归网页阅读器</p>
-        </header>
-
-        <form onsubmit="return false;">
-            <div class="input-group">
-                <label for="url">🎯 起始 URL</label>
-                <input type="url" id="url" placeholder="https://example.com/wiki"
-                    value="https://ai.feishu.cn/wiki/V7J1w3MEPiZdtdkfhFAcOCnJnEh" required>
-            </div>
-
-            <div class="row">
-                <div class="input-group half">
-                    <label for="max-depth">🌊 最大深度</label>
-                    <input type="number" id="max-depth" value="1" min="0" max="5">
+    <div class="app-container">
+        <!-- 左侧：控制面板 -->
+        <aside class="control-panel">
+            <header>
+                <div class="logo">
+                    <svg class="logo-icon" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                        <path d="M12 2L2 7L12 12L22 7L12 2Z" stroke="currentColor" stroke-width="2"
+                            stroke-linecap="round" stroke-linejoin="round" />
+                        <path d="M2 17L12 22L22 17" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                            stroke-linejoin="round" />
+                        <path d="M2 12L12 17L22 12" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                            stroke-linejoin="round" />
+                    </svg>
+                    <span>Web Reader AI</span>
                 </div>
-                <div class="input-group half">
-                    <label for="max-pages">📑 最大页面数</label>
-                    <input type="number" id="max-pages" value="50" min="1" max="1000">
+                <p>智能递归网页采集器</p>
+            </header>
+
+            <form onsubmit="return false;">
+                <div class="input-group">
+                    <label for="url">🎯 起始 URL</label>
+                    <input type="url" id="url" placeholder="https://example.com/wiki" value="" required>
                 </div>
+
+                <div class="row">
+                    <div class="input-group half">
+                        <label for="max-depth">🌊 最大深度</label>
+                        <input type="number" id="max-depth" value="1" min="0" max="5" required>
+                    </div>
+                    <div class="input-group half">
+                        <label for="max-pages">📑 最大页面</label>
+                        <input type="number" id="max-pages" value="5" min="1" max="1000" required>
+                    </div>
+                </div>
+
+                <div class="action-flow">
+                    <button id="btn-preview" class="btn secondary step-btn">
+                        <span class="step-badge">1</span> 预览内容
+                    </button>
+
+                    <div class="flow-connector"></div>
+
+                    <button id="btn-start" class="btn primary step-btn">
+                        <span class="step-badge">2</span> 开始抓取
+                    </button>
+
+                    <div class="flow-connector"></div>
+
+                    <button id="btn-download" class="btn success step-btn" disabled>
+                        <span class="step-badge">3</span> 下载结果
+                    </button>
+                </div>
+            </form>
+
+            <!-- 状态监控 -->
+            <div id="monitor" class="monitor hidden">
+                <div class="monitor-header">
+                    <span id="status-badge" class="badge running">Running</span>
+                    <span id="progress-text">0/0</span>
+                </div>
+                <div class="progress-track">
+                    <div id="progress-bar" class="progress-fill" style="width: 0%"></div>
+                </div>
+                <div id="current-url" class="current-url">等待开始...</div>
+            </div>
+        </aside>
+
+        <!-- 右侧：预览面板 -->
+        <main class="preview-panel">
+            <div id="empty-state" class="empty-state">
+                <div class="empty-icon">📄</div>
+                <h3>尚无内容</h3>
+                <p>点击「预览」后，<br>抓取的页面内容将在此显示，最大展示5页</p>
             </div>
 
-            <div class="actions">
-                <button id="btn-preview" class="btn secondary">
-                    预览 (Preview)
-                </button>
-                <button id="btn-start" class="btn primary">
-                    开始抓取 (Start)
-                </button>
-                <button id="btn-download" class="btn success" disabled>
-                    下载结果 (Download)
-                </button>
-            </div>
-        </form>
+            <div id="content-area" class="content-area hidden">
+                <!-- 目录树 -->
+                <nav id="toc-panel" class="toc-panel">
+                    <div class="toc-header">📚 目录</div>
+                    <ul id="toc-list" class="toc-list">
+                        <!-- 动态填充 -->
+                    </ul>
+                </nav>
 
-        <!-- 状态监控 -->
-        <div id="monitor" class="monitor hidden">
-            <div class="monitor-header">
-                <span id="status-badge" class="badge running">Running</span>
-                <span id="progress-text">0/0</span>
+                <!-- Markdown 预览 -->
+                <article id="md-preview" class="md-preview">
+                    <!-- Markdown 内容渲染到这里 -->
+                </article>
             </div>
-            <div class="progress-track">
-                <div id="progress-bar" class="progress-fill" style="width: 0%"></div>
-            </div>
-            <div id="current-url" class="current-url">Waiting to start...</div>
-        </div>
-
-        <!-- 预览结果 -->
-        <div id="preview-panel" class="preview-panel hidden">
-            <h3>📑 预览结果 (Top 5)</h3>
-            <div id="preview-cards" class="preview-cards">
-                <!-- Cards injected here -->
-            </div>
-        </div>
+        </main>
     </div>
 
+    <div id="toast-container" class="toast-container"></div>
     <script src="/static/app.js"></script>
 </body>
 

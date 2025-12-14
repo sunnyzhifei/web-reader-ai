@@ -5,17 +5,16 @@ __pycache__/
 
 # Virtual Environment
 venv/
-env/
 .env
 
 # Output
 output/
-*.log
+downloads/
 
 # IDE
 .vscode/
 .idea/
 
-# OS
+# System
 .DS_Store
 Thumbs.db

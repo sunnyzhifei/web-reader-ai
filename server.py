@@ -35,6 +35,36 @@ class CrawlRequest(BaseModel):
     url: str
     max_depth: int = 1
     max_pages: int = 50
+    
+    # Pydantic v2 风格的验证器
+    @property
+    def validated_url(self) -> str:
+        return self.url.strip()
+    
+    def validate_params(self) -> tuple[bool, str]:
+        """验证所有参数，返回 (是否有效, 错误消息)"""
+        # 验证 URL
+        url = self.url.strip() if self.url else ""
+        if not url:
+            return False, "URL 不能为空"
+        if not url.startswith(('http://', 'https://')):
+            return False, "URL 必须以 http:// 或 https:// 开头"
+        if len(url) < 10:
+            return False, "URL 格式无效"
+        
+        # 验证 max_depth
+        if self.max_depth is None:
+            return False, "最大深度不能为空"
+        if not isinstance(self.max_depth, int) or self.max_depth < 0 or self.max_depth > 5:
+            return False, "最大深度必须是 0-5 之间的整数"
+        
+        # 验证 max_pages
+        if self.max_pages is None:
+            return False, "最大页面数不能为空"
+        if not isinstance(self.max_pages, int) or self.max_pages < 1 or self.max_pages > 1000:
+            return False, "最大页面数必须是 1-1000 之间的整数"
+        
+        return True, ""
 
 # 实际的异步抓取逻辑
 async def _crawl_logic(task_id: str, req: CrawlRequest, is_preview: bool):
@@ -72,7 +102,7 @@ async def _crawl_logic(task_id: str, req: CrawlRequest, is_preview: bool):
                 preview_list.append({
                     "title": item.get("title", "No Title"),
                     "url": item.get("url", ""),
-                    "text_preview": item.get("text", "")[:300] + "..." if item.get("text") else ""
+                    "text": item.get("text", "")  # 返回完整内容用于 Markdown 预览
                 })
             tasks[task_id]["preview_data"] = preview_list
             tasks[task_id]["status"] = "completed"
@@ -109,6 +139,11 @@ def run_crawl_thread(task_id: str, req: CrawlRequest, is_preview: bool):
 
 @app.post("/api/preview")
 async def start_preview(req: CrawlRequest):
+    # 参数验证
+    is_valid, error_msg = req.validate_params()
+    if not is_valid:
+        raise HTTPException(status_code=400, detail=error_msg)
+    
     task_id = str(uuid.uuid4())
     tasks[task_id] = {
         "status": "running", 
@@ -121,6 +156,11 @@ async def start_preview(req: CrawlRequest):
 
 @app.post("/api/crawl")
 async def start_crawl(req: CrawlRequest):
+    # 参数验证
+    is_valid, error_msg = req.validate_params()
+    if not is_valid:
+        raise HTTPException(status_code=400, detail=error_msg)
+    
     task_id = str(uuid.uuid4())
     tasks[task_id] = {
         "status": "running", 
